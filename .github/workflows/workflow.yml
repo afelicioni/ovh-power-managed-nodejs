@@ -1,0 +1,62 @@
+name: workflow
+
+on: [push]
+
+jobs:
+
+  deploy:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: setup basic environment
+        shell: bash
+        run: |
+          echo "DESTINATION_HOST=${{ secrets.DESTINATION_HOST }}" >> $GITHUB_ENV
+          echo "DESTINATION_USER=${{ secrets.DESTINATION_USER }}" >> $GITHUB_ENV
+          echo "DESTINATION_FINGERPRINT=${{ secrets.DESTINATION_FINGERPRINT }}" >> $GITHUB_ENV
+          echo "DESTINATION_IDENTITY<<EOF" >> $GITHUB_ENV
+          echo "${{ secrets.DESTINATION_IDENTITY }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+          echo "REMOTE_HOST=${{ secrets.REMOTE_HOST }}" >> $GITHUB_ENV
+          echo "REMOTE_USER=git" >> $GITHUB_ENV
+          echo "REMOTE_FINGERPRINT=${{ secrets.REMOTE_FINGERPRINT }}" >> $GITHUB_ENV
+          echo "REMOTE_IDENTITY<<EOF" >> $GITHUB_ENV
+          echo "${{ secrets.REMOTE_IDENTITY }}" >> $GITHUB_ENV
+          echo "EOF" >> $GITHUB_ENV
+
+      - name: environment review
+        shell: bash
+        run: |
+          echo "SOURCE=${{ env.REMOTE_USER }}@${{ env.REMOTE_HOST }}:${{ github.repository }}.git" >> $GITHUB_ENV
+
+      - name: checkout source for workflow scripts files
+        uses: actions/checkout@v2
+        with:
+          path: source
+
+      - name: initialization operations
+        shell: bash
+        run: |
+          mkdir -p ~/.workflow/local
+          echo "$DESTINATION_IDENTITY" > ~/.workflow/local/identity
+          chmod 0600 ~/.workflow/local/identity
+          mkdir -p ~/.workflow/destination
+          echo "$REMOTE_IDENTITY" > ~/.workflow/destination/identity
+          chmod 0600 ~/.workflow/destination/identity
+          echo "$REMOTE_FINGERPRINT" > ~/.workflow/destination/fingerprint
+          bash $GITHUB_WORKSPACE/source/.github/workflows/scripts/checkfingerprint.sh --host ${{ env.DESTINATION_HOST }} --fingerprint ${{ env.DESTINATION_FINGERPRINT }} -k ~/.workflow/local/known_hosts
+
+      - name: copy workflow files
+        shell: bash
+        run: |
+          cp -a $GITHUB_WORKSPACE/source/.github/workflows/scripts ~/.workflow/destination
+          cd ~/.workflow/destination && tar czf - . | ssh -i ~/.workflow/local/identity -o UserKnownHostsFile=~/.workflow/local/known_hosts ${DESTINATION_USER}@${DESTINATION_HOST} -- 'mkdir -p .workflow && cd .workflow && tar xzf - && bash ~/.workflow/scripts/checkfingerprint.sh --host '${{ env.REMOTE_HOST }}' --fingerprint '${{ env.REMOTE_FINGERPRINT }}''
+
+      - name: clone in destination from remote
+        run: ssh -i ~/.workflow/local/identity -o UserKnownHostsFile=~/.workflow/local/known_hosts ${DESTINATION_USER}@${DESTINATION_HOST} -- 'eval "$(ssh-agent -s)" && ssh-add .workflow/identity && (rm -rf ${HOME}/.workflow/.source || true) && git clone '${{ env.SOURCE }}' --single-branch --branch '${GITHUB_REF##*/}' ${HOME}/.workflow/.source'
+
+      - name: run post clone scripts in destination
+        shell: bash
+        run: |
+          ssh -i ~/.workflow/local/identity -o UserKnownHostsFile=~/.workflow/local/known_hosts ${DESTINATION_USER}@${DESTINATION_HOST} -- 'bash ~/.workflow/scripts/appsetup.sh && rm -rf ~/.workflow'
+          echo "done."
